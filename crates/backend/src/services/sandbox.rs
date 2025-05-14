@@ -1,7 +1,7 @@
 use std::{
     ffi::OsStr,
     fs::{self, File},
-    io::{prelude::*, BufReader, ErrorKind},
+    io::{BufReader, ErrorKind, prelude::*},
     os::unix::prelude::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
@@ -101,9 +101,9 @@ impl Sandbox {
 
         fs::set_permissions(&output_dir, PermissionsExt::from_mode(0o777))
             .context("failed to set output permissions")?;
-        
+
         File::create(&input_file).context("failed to create input file")?;
-        
+
         Ok(Sandbox {
             scratch,
             input_file,
@@ -235,7 +235,7 @@ async fn run_command(mut command: Command) -> Result<std::process::Output> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let id = stdout.lines().next().context("missing compiler ID")?.trim();
     let stderr = &output.stderr;
-    
+
     let mut command = docker_command!("wait", id);
     println!("ID: {:?}\nwait: {:?}", id, command);
 
