@@ -3,7 +3,10 @@
     "builds": [
         {
             "src": "Dockerfile",
-            "use": "@vercel/docker"
+            "use": "@vercel/docker",
+            "config": {
+                "outputDirectory": "packages/frontend/public"
+            }
         }
     ],
     "routes": [
