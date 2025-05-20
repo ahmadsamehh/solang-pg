@@ -508,3 +508,4 @@ $RECYCLE.BIN/
 package-lock.json
 
 packages/_generated/*/src
+.vercel

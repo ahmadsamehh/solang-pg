@@ -1,7 +1,4 @@
-use crate::services::{CompilationRequest, CompilationResult};
-use anyhow::{Context, Result};
 use std::{
-    env,
     ffi::OsStr,
     fs::{self, File},
     io::{BufReader, ErrorKind, prelude::*},
@@ -9,8 +6,12 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+
+use anyhow::{Context, Result};
 use tempfile::TempDir;
 use tokio::process::Command;
+
+use crate::services::{CompilationRequest, CompilationResult};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 // const DOCKER_IMAGE_BASE_NAME: &str = "ghcr.io/hyperledger-solang/solang@sha256:e6f687910df5dd9d4f5285aed105ae0e6bcae912db43e8955ed4d8344d49785d";
@@ -30,75 +31,54 @@ macro_rules! docker_command {
 /// Builds the compile command using solang docker image
 pub fn build_compile_command(input_file: &Path, output_dir: &Path) -> Command {
     println!("ip file: {:?}\nop dir: {:?}", input_file, output_dir);
+    // Base docker command
+    let mut cmd = docker_command!(
+        "run",
+        "--detach",
+        // "--rm",
+        "-it",
+        "--cap-drop=ALL",
+        "--cap-add=DAC_OVERRIDE",
+        "--security-opt=no-new-privileges",
+        "--workdir",
+        DOCKER_WORKDIR,
+        "--net=none",
+        "--memory=1024m",
+        "--memory-swap=1200m",
+        "--env",
+        format!("PLAYGROUND_TIMEOUT={}", TIMEOUT.as_secs()),
+        // The entry point of solang is /usr/bin/solang so we need to override it with /bin/sh
+        "--entrypoint=/bin/sh",
+    );
+    cmd.kill_on_drop(true);
 
-    // Check if we're in Vercel environment
-    let is_vercel = env::var("VERCEL").is_ok();
+    // Mounting input file
+    let file_name = "input.sol";
+    let mut mount_input_file = input_file.as_os_str().to_os_string();
+    mount_input_file.push(":");
+    mount_input_file.push(DOCKER_WORKDIR);
+    mount_input_file.push(file_name);
+    cmd.arg("--volume").arg(&mount_input_file);
 
-    if is_vercel {
-        // In Vercel, we use a simplified approach without Docker
-        let mut cmd = Command::new("solang");
-        cmd.arg("compile")
-            .arg("--target")
-            .arg("soroban")
-            .arg("-o")
-            .arg(output_dir)
-            .arg(input_file)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+    // Mounting output directory
+    let mut mount_output_dir = output_dir.as_os_str().to_os_string();
+    mount_output_dir.push(":");
+    mount_output_dir.push(DOCKER_OUTPUT);
+    cmd.arg("--volume").arg(&mount_output_dir);
 
-        cmd
-    } else {
-        // Original Docker-based approach for local development
-        // Base docker command
-        let mut cmd = docker_command!(
-            "run",
-            "--detach",
-            // "--rm",
-            // "-it",
-            "--cap-drop=ALL",
-            "--cap-add=DAC_OVERRIDE",
-            "--security-opt=no-new-privileges",
-            "--workdir",
-            DOCKER_WORKDIR,
-            "--net=none",
-            "--memory=1024m",
-            "--memory-swap=1200m",
-            "--env",
-            format!("PLAYGROUND_TIMEOUT={}", TIMEOUT.as_secs()),
-            // The entry point of solang is /usr/bin/solang so we need to override it with /bin/sh
-            "--entrypoint=/bin/sh",
-        );
+    // Using the solang image
+    cmd.arg(DOCKER_IMAGE_BASE_NAME);
 
-        cmd.kill_on_drop(true);
+    // Building the compile command
+    let remove_command = format!("rm -rf {}*.wasm {}*.contract", DOCKER_OUTPUT, DOCKER_OUTPUT);
+    let compile_command = format!(
+        "solang compile --target soroban -o /playground-result {} > /playground-result/stdout.log 2> /playground-result/stderr.log",
+        file_name
+    );
+    let sh_command = format!("{} && {}", remove_command, compile_command);
+    cmd.arg("-c").arg(sh_command);
 
-        // Mounting input file
-        let file_name = "input.sol";
-        let mut mount_input_file = input_file.as_os_str().to_os_string();
-        mount_input_file.push(":");
-        mount_input_file.push(DOCKER_WORKDIR);
-        mount_input_file.push(file_name);
-        cmd.arg("--volume").arg(&mount_input_file);
-
-        // Mounting output directory
-        let mut mount_output_dir = output_dir.as_os_str().to_os_string();
-        mount_output_dir.push(":");
-        mount_output_dir.push(DOCKER_OUTPUT);
-        cmd.arg("--volume").arg(&mount_output_dir);
-
-        // Using the solang image
-        cmd.arg(DOCKER_IMAGE_BASE_NAME);
-
-        // Building the compile command
-        let remove_command = format!("rm -rf {}*.wasm {}*.contract", DOCKER_OUTPUT, DOCKER_OUTPUT);
-        let compile_command = format!(
-            "solang compile --target soroban -o /playground-result {} > /playground-result/stdout.log 2> /playground-result/stderr.log",
-            file_name
-        );
-        let sh_command = format!("{} && {}", remove_command, compile_command);
-        cmd.arg("-c").arg(sh_command);
-
-        cmd
-    }
+    cmd
 }
 
 /// Sandbox represents a temporary directory where the contract is compiled
@@ -118,9 +98,12 @@ impl Sandbox {
         let input_file = scratch.path().join("input.sol");
         let output_dir = scratch.path().join("output");
         fs::create_dir(&output_dir).context("failed to create output directory")?;
+
         fs::set_permissions(&output_dir, PermissionsExt::from_mode(0o777))
             .context("failed to set output permissions")?;
+
         File::create(&input_file).context("failed to create input file")?;
+
         Ok(Sandbox {
             scratch,
             input_file,
@@ -131,8 +114,10 @@ impl Sandbox {
     /// Compiles the contract given the source code
     pub fn compile(&self, req: &CompilationRequest) -> Result<CompilationResult> {
         self.write_source_code(&req.source)?;
+
         let command = build_compile_command(&self.input_file, &self.output_dir);
         // println!("Executing command: \n{:#?}", command);
+
         let output = run_command(command)?;
         println!("out: {:?}", output);
         let file = fs::read_dir(&self.output_dir)
@@ -164,7 +149,6 @@ impl Sandbox {
             Some(path) => fs::read_to_string(&path).context("failed to read compile stderr")?,
             None => "No stderr.log file found".to_string(),
         };
-
         let compile_stderr = extract_error_message(&compile_stderr);
 
         let stdout = String::from_utf8(output.stdout).context("failed to convert vec to string")?;
@@ -244,19 +228,10 @@ fn read(path: &Path) -> Result<Option<Vec<u8>>> {
 async fn run_command(mut command: Command) -> Result<std::process::Output> {
     use std::os::unix::process::ExitStatusExt;
 
-    // Check if we're in Vercel environment
-    let is_vercel = env::var("VERCEL").is_ok();
-
-    if is_vercel {
-        // In Vercel, just run the command directly
-        println!("executing command in Vercel: {:?}", command);
-        return command.output().context("failed to run compiler");
-    }
-
-    // Original implementation for Docker-based approach
     let timeout = TIMEOUT;
     println!("executing command: {:?}", command);
     let output = command.output().await.context("failed to start compiler")?;
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let id = stdout.lines().next().context("missing compiler ID")?.trim();
     let stderr = &output.stderr;
@@ -277,27 +252,41 @@ async fn run_command(mut command: Command) -> Result<std::process::Output> {
     let mut command = docker_command!("logs", id);
     println!("logs: {:?}", command);
     let mut output = command.output().await.context("failed to get output from compiler")?;
+    println!("op: {:?}", output);
+    // let mut command = docker_command!(
+    //     "rm", // Kills container if still running
+    //     "--force", id
+    // );
+    // println!("rm: {:?}", command);
+    // command.stdout(std::process::Stdio::null());
+    // command.status().await.context("failed to remove compiler")?;
 
-    let mut command = docker_command!("rm", "-f", id);
-    println!("rm: {:?}", command);
-    command.output().await.context("failed to remove compiler")?;
-
-    match timed_out {
-        Ok(status) => {
-            if !status.success() {
-                eprintln!("compiler exited with status {:?}", status.code());
-            }
-        },
-        Err(_) => {
-            eprintln!("compiler timed out after {} seconds", timeout.as_secs());
-            output.status = ExitStatusExt::from_raw(124); // 124 is the status code for timeout
-        },
-    }
+    let code = timed_out.context("compiler timed out")?;
+    println!("timedout: {:?}", code);
+    output.status = code;
+    output.stderr = stderr.to_owned();
 
     Ok(output)
 }
 
-/// Extracts the error message from the stderr output
-fn extract_error_message(stderr: &str) -> String {
-    stderr.to_string()
+pub fn extract_error_message(log: &str) -> String {
+    // Remove ANSI escape codes (used for terminal colors)
+    let cleaned_log = remove_ansi_escape_codes(log);
+
+    // Find the start of the actual error message by looking for the keyword "error:"
+    if let Some(start) = cleaned_log.find("error:") {
+        // Extract the error message starting from the keyword "error:" but ignore the keyword itself
+        let error_message = &cleaned_log[start + "error:".len()..];
+        error_message.to_string()
+    } else {
+        // If no error message is found, return a default message
+        "No error message found".to_string()
+    }
+}
+
+/// Helper function to remove ANSI escape codes from a string
+fn remove_ansi_escape_codes(log: &str) -> String {
+    // Use a regex pattern to remove ANSI escape codes
+    let re = regex::Regex::new(r"\x1B\[[0-9;]*[a-zA-Z]").unwrap();
+    re.replace_all(log, "").to_string()
 }
