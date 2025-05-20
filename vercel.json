@@ -1,5 +1,8 @@
 {
     "version": 2,
+    "buildCommand": null,
+    "devCommand": null,
+    "framework": null,
     "builds": [
         {
             "src": "Dockerfile",
@@ -15,7 +18,7 @@
             "dest": "/"
         },
         {
-            "src": "/(.* )",
+            "src": "/(.*)",
             "dest": "/"
         }
     ]
