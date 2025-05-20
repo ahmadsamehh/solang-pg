@@ -1,0 +1,5 @@
+[build]
+builder = "dockerfile"
+
+[deploy]
+startCommand = "/app/backend --frontend-folder /app/packages/frontend/public --host 0.0.0.0 --port $PORT"
